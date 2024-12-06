@@ -335,6 +335,7 @@ class OmniGen(nn.Module, PeftAdapterMixin):
 
 
     def patch_multiple_resolutions(self, latents, padding_latent=None, is_input_images:bool=False):
+        embedder = self.input_x_embedder if is_input_images else self.x_embedder
         if isinstance(latents, list):
             return_list = False
             if padding_latent is None:
@@ -343,12 +344,14 @@ class OmniGen(nn.Module, PeftAdapterMixin):
             patched_latents, num_tokens, shapes = [], [], []
             for latent, padding in zip(latents, padding_latent):
                 height, width = latent.shape[-2:]
-                if is_input_images:
-                    latent = self.input_x_embedder(latent)
-                else:
-                    latent = self.x_embedder(latent)
+                latent = embedder(latent)
+                # if is_input_images:
+                #     latent = self.input_x_embedder(latent)
+                # else:
+                #     latent = self.x_embedder(latent)
                 pos_embed = self.cropped_pos_embed(height, width)    
-                latent = latent + pos_embed
+                # latent = latent + pos_embed
+                latent += pos_embed
                 if padding is not None:
                     latent = torch.cat([latent, padding], dim=-2)
                 patched_latents.append(latent)
@@ -361,12 +364,14 @@ class OmniGen(nn.Module, PeftAdapterMixin):
                 latents = patched_latents
         else:
             height, width = latents.shape[-2:]
-            if is_input_images:
-                latents = self.input_x_embedder(latents)
-            else:
-                latents = self.x_embedder(latents)
-            pos_embed = self.cropped_pos_embed(height, width)  
-            latents = latents + pos_embed
+            latents = embedder(latents)
+            # if is_input_images:
+            #     latents = self.input_x_embedder(latents)
+            # else:
+            #     latents = self.x_embedder(latents)
+            #pos_embed = self.cropped_pos_embed(height, width)
+            #latents = latents + pos_embed
+            latents += self.cropped_pos_embed(height, width)
             num_tokens = latents.size(1)
             shapes = [height, width]
         return latents, num_tokens, shapes
@@ -376,6 +381,8 @@ class OmniGen(nn.Module, PeftAdapterMixin):
         """
         
         """
+        if offload_model:
+            self.pos_embed=self.pos_embed.to(x.device)
         input_is_list = isinstance(x, list)
         x, num_tokens, shapes = self.patch_multiple_resolutions(x, padding_latent)
         time_token = self.time_token(timestep, dtype=x[0].dtype).unsqueeze(1)   
@@ -395,8 +402,15 @@ class OmniGen(nn.Module, PeftAdapterMixin):
             input_emb = torch.cat([condition_embeds, time_token, x], dim=1)
         else:
             input_emb = torch.cat([time_token, x], dim=1)
-
-        output = self.llm(inputs_embeds=input_emb, attention_mask=attention_mask, position_ids=position_ids, past_key_values=past_key_values, offload_model=offload_model)
+        
+        if offload_model:
+            self.pos_embed=self.pos_embed.to("cpu") # ~200mb
+            torch.cuda.empty_cache()
+            gc.collect()
+        
+        output = self.llm(inputs_embeds=input_emb, attention_mask=attention_mask, position_ids=position_ids, past_key_values=past_key_values, 
+                          offload_model=(offload_model ))#and not self.quantized))
+            
         output, past_key_values = output.last_hidden_state, output.past_key_values
         if input_is_list:
             image_embedding = output[:, -max(num_tokens):]
@@ -446,7 +460,8 @@ class OmniGen(nn.Module, PeftAdapterMixin):
 
         model_out, pask_key_values = [], []
         for i in range(len(input_ids)):
-            temp_out, temp_pask_key_values = self.forward(x[i], timestep[i], input_ids[i], input_img_latents[i], input_image_sizes[i], attention_mask[i], position_ids[i], past_key_values=past_key_values[i], return_past_key_values=True, offload_model=offload_model)
+            temp_out, temp_pask_key_values = self.forward(x[i], timestep[i], input_ids[i], input_img_latents[i], input_image_sizes[i], attention_mask[i], position_ids[i], 
+                                                          past_key_values=past_key_values[i], return_past_key_values=True, offload_model=offload_model)
             model_out.append(temp_out)
             pask_key_values.append(temp_pask_key_values)
 
