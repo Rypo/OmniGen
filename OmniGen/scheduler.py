@@ -33,10 +33,10 @@ class OmniGenCache(DynamicCache):
         "Moves the previous layer cache to the CPU"
         if len(self) > 2:
             # We do it on the default stream so it occurs after all earlier computations on these tensors are done
-            if layer_idx == 0: 
-                prev_layer_idx = -1
-            else:
-                prev_layer_idx = (layer_idx - 1) % len(self)
+            #if layer_idx == 0: 
+            #    prev_layer_idx = -1
+            #else:
+            prev_layer_idx = (layer_idx - 1) % len(self)
             self.key_cache[prev_layer_idx] = self.key_cache[prev_layer_idx].to("cpu")
             self.value_cache[prev_layer_idx] = self.value_cache[prev_layer_idx].to("cpu")
 
@@ -154,17 +154,19 @@ class OmniGenScheduler:
 
     def __call__(self, z, func, model_kwargs, use_kv_cache: bool=True, offload_kv_cache: bool=True):
         num_tokens_for_img = z.size(-1)*z.size(-2) // 4
-        if isinstance(model_kwargs['input_ids'], list):
-            cache = [OmniGenCache(num_tokens_for_img, offload_kv_cache) for _ in range(len(model_kwargs['input_ids']))] if use_kv_cache else None
-        else:
-            cache = OmniGenCache(num_tokens_for_img, offload_kv_cache) if use_kv_cache else None
+        cache = None
+        if use_kv_cache:
+            if isinstance(model_kwargs['input_ids'], list):
+                cache = [OmniGenCache(num_tokens_for_img, offload_kv_cache) for _ in range(len(model_kwargs['input_ids']))]
+            else:
+                cache = OmniGenCache(num_tokens_for_img, offload_kv_cache)
         results = {}
         for i in tqdm(range(self.num_steps)):
-            timesteps = torch.zeros(size=(len(z), )).to(z.device) + self.sigma[i]
+            # timesteps = torch.zeros(size=(len(z), )).to(z.device) + self.sigma[i]
+            timesteps = torch.full(size=(len(z), ), fill_value=self.sigma[i], device=z.device)
             pred, cache = func(z, timesteps, past_key_values=cache, **model_kwargs)
-            sigma_next = self.sigma[i+1]
-            sigma = self.sigma[i]
-            z = z + (sigma_next - sigma) * pred
+
+            z += (self.sigma[i+1] - self.sigma[i]) * pred
             if i == 0 and use_kv_cache:
                 num_tokens_for_img = z.size(-1)*z.size(-2) // 4
                 if isinstance(cache, list):
