@@ -43,9 +43,6 @@ class Phi3Transformer(Phi3Model):
             param.data = param.data.to("cpu")
             
     def get_offload_layer(self, layer_idx: int, device: torch.device):
-        # init stream
-        if not hasattr(self, "prefetch_stream"):
-            self.prefetch_stream = torch.cuda.Stream()
 
         # delete previous layer
         # main stream sync shouldn't be necessary since all computation on iter i-1 is finished by iter i
@@ -135,6 +132,10 @@ class Phi3Transformer(Phi3Model):
         all_hidden_states = () if output_hidden_states else None
         all_self_attns = () if output_attentions else None
         next_decoder_cache = None
+        
+        # init stream
+        if offload_model and not hasattr(self, "prefetch_stream"):
+            self.prefetch_stream = torch.cuda.Stream(inputs_embeds.device)
 
         for layer_idx in range(len(self.layers)):
             # direct indexing since offloading may mutate self.layers during iteration 
