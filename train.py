@@ -27,6 +27,8 @@ from safetensors.torch import save_file
 
 from diffusers.models import AutoencoderKL
 
+from transformers import BitsAndBytesConfig
+
 from OmniGen import OmniGen, OmniGenProcessor
 from OmniGen.train_helper import DatasetFromJson, TrainDataCollator
 from OmniGen.train_helper import training_losses
@@ -39,6 +41,9 @@ from OmniGen.utils import (
     vae_encode,
     vae_encode_list
 )
+
+quantization_config = BitsAndBytesConfig(load_in_4bit=True, bnb_4bit_quant_type='nf4')
+# quantization_config = BitsAndBytesConfig(load_in_8bit=True) # for 8-bit
 
 def main(args):
     # Setup accelerator:
@@ -71,7 +76,7 @@ def main(args):
                                         cache_dir=cache_folder,
                                         ignore_patterns=['flax_model.msgpack', 'rust_model.ot', 'tf_model.h5'])
         logger.info(f"Downloaded model to {args.model_name_or_path}")
-    model = OmniGen.from_pretrained(args.model_name_or_path)
+    model = OmniGen.from_pretrained(args.model_name_or_path, quantization_config=quantization_config)
     model.llm.config.use_cache = False
     model.llm.gradient_checkpointing_enable()
     model = model.to(device)
