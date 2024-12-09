@@ -1,6 +1,7 @@
 # The code is revised from DiT
 import os
 import gc
+import copy
 import warnings
 from pathlib import Path
 import torch
@@ -14,8 +15,8 @@ from diffusers.utils import logging
 from timm.models.vision_transformer import PatchEmbed, Attention, Mlp
 from huggingface_hub import snapshot_download
 from safetensors.torch import load_file
-from accelerate import init_empty_weights
-from transformers import BitsAndBytesConfig
+from accelerate import init_empty_weights,load_checkpoint_and_dispatch
+from transformers import BitsAndBytesConfig, PreTrainedModel
 
 from OmniGen.transformer import Phi3Config, Phi3Transformer
 from OmniGen.utils import quantize_bnb
@@ -192,13 +193,15 @@ class OmniGen(nn.Module, PeftAdapterMixin):
         self.final_layer = FinalLayer(hidden_size, patch_size, self.out_channels)
 
         self.initialize_weights()
-
-        self.llm = Phi3Transformer(config=transformer_config)
+       
+        self.llm = Phi3Transformer(config=transformer_config)#, attn_implementation='flash_attention_2', torch_dtype=torch.bfloat16)
+        
         self.llm.config.use_cache = False
 
         # bnb quantized models cannot easily be offloaded or recast
         self.quantized = False
         self.dtype = None
+        self.device = torch.device('cuda')
     
     @classmethod
     def from_pretrained(cls, model_name: str|os.PathLike, dtype: torch.dtype = torch.bfloat16, quantization_config: BitsAndBytesConfig = None, low_cpu_mem_usage: bool = True,):
@@ -227,7 +230,8 @@ class OmniGen(nn.Module, PeftAdapterMixin):
         ckpt = (load_file(model_path, 'cpu') if model_path.suffix == '.safetensors' else 
                 torch.load(model_path, map_location='cpu'))
         
-        config = Phi3Config.from_pretrained(config_loc)
+        config = Phi3Config.from_pretrained(config_loc)#, attn_implementation='flash_attention_2', torch_dtype=dtype)
+        # config.attn_implementation = 
 
         if hasattr(config, 'quantization_config'):
             if quantization_config is not None:
@@ -242,14 +246,16 @@ class OmniGen(nn.Module, PeftAdapterMixin):
 
         if low_cpu_mem_usage:
             with init_empty_weights():
-                model = cls(config)
+                model = cls(config).to(dtype)
             
             if quantization_config:
                 model = quantize_bnb(model, ckpt, quantization_config=quantization_config, dtype=dtype)
                 model.quantized = True
                 model.config.quantization_config = quantization_config
             else:
+                #model = load_checkpoint_and_dispatch(model, model_path.as_posix(), device_map='auto', dtype=dtype)
                 model.load_state_dict(ckpt, assign=True)
+                
         else:
             if quantization_config:
                 raise ValueError('Quantization not supported for `low_cpu_mem_usage=False`.')
@@ -341,6 +347,7 @@ class OmniGen(nn.Module, PeftAdapterMixin):
             if padding_latent is None:
                 padding_latent = [None] * len(latents)
                 return_list = True
+            
             patched_latents, num_tokens, shapes = [], [], []
             for latent, padding in zip(latents, padding_latent):
                 height, width = latent.shape[-2:]
@@ -358,10 +365,12 @@ class OmniGen(nn.Module, PeftAdapterMixin):
 
                 num_tokens.append(pos_embed.size(1))
                 shapes.append([height, width])
-            if not return_list:
-                latents = torch.cat(patched_latents, dim=0)
-            else:
-                latents = patched_latents
+            
+            latents = patched_latents if return_list else torch.cat(patched_latents, dim=0)
+            # if not return_list:
+            #     latents = torch.cat(patched_latents, dim=0)
+            # else:
+            #     latents = patched_latents
         else:
             height, width = latents.shape[-2:]
             latents = embedder(latents)
@@ -409,18 +418,19 @@ class OmniGen(nn.Module, PeftAdapterMixin):
             gc.collect()
         
         output = self.llm(inputs_embeds=input_emb, attention_mask=attention_mask, position_ids=position_ids, past_key_values=past_key_values, 
-                          offload_model=(offload_model ))#and not self.quantized))
+                          offload_model=(offload_model and not self.quantized))
             
         output, past_key_values = output.last_hidden_state, output.past_key_values
         if input_is_list:
             image_embedding = output[:, -max(num_tokens):]
             time_emb = self.t_embedder(timestep, dtype=x.dtype)
             x = self.final_layer(image_embedding, time_emb)
-            latents = []
-            for i in range(x.size(0)):
-                latent = x[i:i+1, :num_tokens[i]]
-                latent = self.unpatchify(latent, shapes[i][0], shapes[i][1])
-                latents.append(latent)
+            latents = [self.unpatchify(x[i:i+1, :num_tokens[i]], shapes[i][0], shapes[i][1]) for i in range(x.size(0))]
+            # latents = []
+            # for i in range(x.size(0)):
+            #     latent = x[i:i+1, :num_tokens[i]]
+            #     latent = self.unpatchify(latent, shapes[i][0], shapes[i][1])
+            #     latents.append(latent)
         else:
             image_embedding = output[:, -num_tokens:]
             time_emb = self.t_embedder(timestep, dtype=x.dtype)
@@ -445,26 +455,65 @@ class OmniGen(nn.Module, PeftAdapterMixin):
             cond = uncond + cfg_scale * (cond - uncond)
             model_out = [cond, cond]
         
+        print([f'{kvb/(1024**2):0.3f}' for kvb in past_key_values.cached_bytes()])
         return torch.cat(model_out, dim=0), past_key_values
 
-
+    def none_device(self, val, device=None):
+        device = self.device if device is None else device
+        if val is not None:
+            if isinstance(val, list):
+                return [v.to(device) for v in val]
+            return val.to(device)
+    
     @torch.no_grad()
     def forward_with_separate_cfg(self, x, timestep, input_ids, input_img_latents, input_image_sizes, attention_mask, position_ids, cfg_scale, use_img_cfg, img_cfg_scale, past_key_values, use_kv_cache, offload_model):
         self.llm.config.use_cache = use_kv_cache
         if past_key_values is None:
-            past_key_values = [None] * len(attention_mask)
+           past_key_values = [None] * len(attention_mask)
 
         x = torch.split(x, len(x) // len(attention_mask), dim=0)
-        timestep = timestep.to(x[0].dtype)
-        timestep = torch.split(timestep, len(timestep) // len(input_ids), dim=0)
+        #timestep = timestep.to(x[0].dtype)
+        timestep = torch.split(timestep.to(x[0].dtype), len(timestep) // len(input_ids), dim=0)
 
-        model_out, pask_key_values = [], []
+        # model_out, pask_key_values = [], []
+        model_out = []
+        
         for i in range(len(input_ids)):
-            temp_out, temp_pask_key_values = self.forward(x[i], timestep[i], input_ids[i], input_img_latents[i], input_image_sizes[i], attention_mask[i], position_ids[i], 
-                                                          past_key_values=past_key_values[i], return_past_key_values=True, offload_model=offload_model)
-            model_out.append(temp_out)
-            pask_key_values.append(temp_pask_key_values)
+            temp_out, past_key_values[i] = self.forward(
+                self.none_device(x[i]), 
+                timestep[i], 
+                self.none_device(input_ids[i]), 
+                self.none_device(input_img_latents[i]), 
+                input_image_sizes[i], 
+                self.none_device(attention_mask[i]), 
+                self.none_device(position_ids[i]),
+                past_key_values=past_key_values[i], 
+                return_past_key_values=True, 
+                offload_model=offload_model
+            )
+            # temp_out, past_key_values = self.forward(x[i], timestep[i], input_ids[i], input_img_latents[i], input_image_sizes[i], attention_mask[i], position_ids[i], 
+                                                        #   past_key_values=past_key_values, return_past_key_values=True, offload_model=offload_model)
+            #past_key_values[i] = past_kv_i                                              
+            
+            print([f'{kvb/(1024**2):0.3f}' for kvb in past_key_values[i].cached_bytes()])
+            if offload_model:
+                #x[i] = self.none_device(x[i],'cpu')
+                # input_ids[i] = self.none_device(input_ids[i],'cpu')
+                # input_img_latents[i] = self.none_device(input_img_latents[i])
+                # attention_mask[i] = self.none_device(attention_mask[i],'cpu')
+                # position_ids[i] = self.none_device(position_ids[i],'cpu')
+                model_out.append(self.none_device(temp_out, 'cpu'))
+                torch.cuda.empty_cache()
+                gc.collect()
+            else:
+                model_out.append(temp_out)
 
+            
+            # pask_key_values.append(temp_pask_key_values)
+            #pask_key_values = temp_pask_key_values
+        if offload_model:
+            model_out = self.none_device(model_out)
+        
         if len(model_out) == 3:
             cond, uncond, img_cond = model_out
             cond = uncond + img_cfg_scale * (img_cond - uncond) + cfg_scale * (cond - img_cond)
@@ -476,7 +525,7 @@ class OmniGen(nn.Module, PeftAdapterMixin):
         else:
             return model_out[0]
         
-        return torch.cat(model_out, dim=0), pask_key_values
+        return torch.cat(model_out, dim=0), past_key_values#pask_key_values
 
 
 

@@ -260,10 +260,10 @@ class OmniGenPipeline:
         if not self.model.quantized:
             self.model.dtype = dtype
             self.model.to(dtype)
-        
-        self.vae.to(dtype) # Uncomment this line to allow bfloat16 VAE
-        self.vae.enable_tiling()
-        self.vae.enable_slicing()
+        if self.model_cpu_offload and separate_cfg_infer:
+            self.vae = self.vae.to(dtype) # Uncomment this line to allow bfloat16 VAE
+        # self.vae.enable_tiling()
+        # self.vae.enable_slicing()
         if offload_model:
             self.enable_model_cpu_offload()
         else:
@@ -289,8 +289,9 @@ class OmniGenPipeline:
         
         input_img_latents = []
         if separate_cfg_infer:
+            _device = 'cpu' if self.model_cpu_offload else self.device
             for temp_pixel_values in input_data['input_pixel_values']:
-                input_img_latents.append([self.vae_encode(img.to(self.vae.device, self.vae.dtype), self.model.dtype) for img in temp_pixel_values])
+                input_img_latents.append([self.vae_encode(img.to(self.vae.device, self.vae.dtype), self.model.dtype).to(_device) for img in temp_pixel_values])
         else:
             for img in input_data['input_pixel_values']:
                 input_img_latents.append(self.vae_encode(img.to(self.vae.device, self.vae.dtype), self.model.dtype))
@@ -304,11 +305,14 @@ class OmniGenPipeline:
         print_mem('After Vae Encode')
 
         model_kwargs = dict(
-            input_ids=self.move_to_device(input_data['input_ids']), 
+            # input_ids=self.move_to_device(input_data['input_ids']), 
+            input_ids=input_data['input_ids'], 
             input_img_latents=input_img_latents, 
             input_image_sizes=input_data['input_image_sizes'], 
-            attention_mask=self.move_to_device(input_data["attention_mask"]), 
-            position_ids=self.move_to_device(input_data["position_ids"]), 
+            # attention_mask=self.move_to_device(input_data["attention_mask"]), 
+            # position_ids=self.move_to_device(input_data["position_ids"]), 
+            attention_mask=input_data["attention_mask"], 
+            position_ids=input_data["position_ids"], 
             cfg_scale=guidance_scale,
             img_cfg_scale=img_guidance_scale,
             use_img_cfg=use_img_guidance,
@@ -321,7 +325,7 @@ class OmniGenPipeline:
         else:
             func = self.model.forward_with_cfg
 
-        if self.model_cpu_offload: #and not self.model.quantized:
+        if self.model_cpu_offload and not self.model.quantized:
             for name, param in self.model.named_parameters():
                 device = 'cpu' if 'layers' in name and 'layers.0' not in name else self.device
                 param.data = param.data.to(device)
