@@ -19,6 +19,29 @@ class OmniGenCache(DynamicCache):
         self.prefetch_stream = torch.cuda.Stream()
         self.num_tokens_for_img = num_tokens_for_img
         self.offload_kv_cache = offload_kv_cache
+        # self.n_copies = n_copies
+    
+    def cached_bytes(self,):
+        k_cpu_bytes,k_gpu_bytes = 0,0 
+        v_cpu_bytes,v_gpu_bytes = 0,0 
+        
+        for i in range(len(self)):
+            k = self.key_cache[i]
+            v = self.value_cache[i]
+
+            if k != []:
+                if k.device.type == 'cpu':
+                    k_cpu_bytes += k.nbytes
+                else:
+                    k_gpu_bytes += k.nbytes
+        
+            if v != []:
+                if v.device.type == 'cpu':
+                    v_cpu_bytes += v.nbytes
+                else:
+                    v_gpu_bytes += v.nbytes
+
+        return k_cpu_bytes, k_gpu_bytes, v_cpu_bytes, v_gpu_bytes
 
     def prefetch_layer(self, layer_idx: int):
         "Starts prefetching the next layer cache"
@@ -51,6 +74,7 @@ class OmniGenCache(DynamicCache):
                 # Load current layer cache to its original device if not already there
                 #original_device = self.original_device[layer_idx]
                 # self.prefetch_stream.synchronize(original_device)
+                #if self.prefetch_stream:
                 self.prefetch_stream.synchronize()
                 key_tensor = self.key_cache[layer_idx]
                 value_tensor = self.value_cache[layer_idx]
@@ -155,11 +179,16 @@ class OmniGenScheduler:
     def __call__(self, z, func, model_kwargs, use_kv_cache: bool=True, offload_kv_cache: bool=True):
         num_tokens_for_img = z.size(-1)*z.size(-2) // 4
         cache = None
+        n_cache = 1
         if use_kv_cache:
+            # if isinstance(model_kwargs['input_ids'], list):
+            #     cache_cps = len(model_kwargs['input_ids'])
             if isinstance(model_kwargs['input_ids'], list):
-                cache = [OmniGenCache(num_tokens_for_img, offload_kv_cache) for _ in range(len(model_kwargs['input_ids']))]
+                n_cache = len(model_kwargs['input_ids'])
+                cache = [OmniGenCache(num_tokens_for_img, offload_kv_cache) for _ in range(n_cache)]
             else:
                 cache = OmniGenCache(num_tokens_for_img, offload_kv_cache)
+            #cache = OmniGenCache(num_tokens_for_img, offload_kv_cache, n_copies=cache_cps)
         results = {}
         for i in tqdm(range(self.num_steps)):
             # timesteps = torch.zeros(size=(len(z), )).to(z.device) + self.sigma[i]
@@ -169,10 +198,11 @@ class OmniGenScheduler:
             z += (self.sigma[i+1] - self.sigma[i]) * pred
             if i == 0 and use_kv_cache:
                 num_tokens_for_img = z.size(-1)*z.size(-2) // 4
-                if isinstance(cache, list):
-                    model_kwargs['input_ids'] = [None] * len(cache)
-                else:
-                    model_kwargs['input_ids'] = None
+                model_kwargs['input_ids'] = [None]*n_cache if n_cache > 1 else None
+                # if isinstance(cache, list):
+                #     model_kwargs['input_ids'] = [None] * len(cache)
+                # else:
+                #     model_kwargs['input_ids'] = None
 
                 model_kwargs['position_ids'] = self.crop_position_ids_for_cache(model_kwargs['position_ids'], num_tokens_for_img)
                 model_kwargs['attention_mask'] = self.crop_attention_mask_for_cache(model_kwargs['attention_mask'], num_tokens_for_img)
