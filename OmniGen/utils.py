@@ -132,8 +132,9 @@ def quantize_bnb(meta_model, state_dict:dict, quantization_config:BitsAndBytesCo
     meta_model.requires_grad_(False)
     
     model = meta_model
-
-    quantizer.preprocess_model(model, device_map=None,)
+    from accelerate import infer_auto_device_map
+    device_map = infer_auto_device_map(model, dtype=torch.bfloat16)
+    quantizer.preprocess_model(model, device_map=device_map,)
     
     # iterate the model keys, otherwise quantized state dict will throws errors
     for param_name in model.state_dict():

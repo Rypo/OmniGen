@@ -206,6 +206,9 @@ class OmniGenScheduler:
 
                 model_kwargs['position_ids'] = self.crop_position_ids_for_cache(model_kwargs['position_ids'], num_tokens_for_img)
                 model_kwargs['attention_mask'] = self.crop_attention_mask_for_cache(model_kwargs['attention_mask'], num_tokens_for_img)
+                for i in range(n_cache):
+                    scache = cache[i] if isinstance(cache, list) else cache
+                    print('k_cpu,k_gpu, v_cpu,v_gpu:', [f'{kvb/(1024**2):0.3f}' for kvb in scache.cached_bytes()])
 
         del cache
         torch.cuda.empty_cache()  

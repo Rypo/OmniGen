@@ -177,7 +177,8 @@ class OmniGenPipeline:
         self.model.to(self.device)
         self.vae.to(self.device)
 
-    @torch.no_grad()
+    # @torch.no_grad()
+    @torch.inference_mode()
     @replace_example_docstring(EXAMPLE_DOC_STRING)
     def __call__(
         self,

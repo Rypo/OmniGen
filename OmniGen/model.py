@@ -391,7 +391,8 @@ class OmniGen(nn.Module, PeftAdapterMixin):
         
         """
         if offload_model:
-            self.pos_embed=self.pos_embed.to(x.device)
+            self.pos_embed=self.pos_embed.to(self.device)
+            self.llm.embed_tokens.to(self.device)
         input_is_list = isinstance(x, list)
         x, num_tokens, shapes = self.patch_multiple_resolutions(x, padding_latent)
         time_token = self.time_token(timestep, dtype=x[0].dtype).unsqueeze(1)   
@@ -414,6 +415,7 @@ class OmniGen(nn.Module, PeftAdapterMixin):
         
         if offload_model:
             self.pos_embed=self.pos_embed.to("cpu") # ~200mb
+            self.llm.embed_tokens.to("cpu")  # ~187mb
             torch.cuda.empty_cache()
             gc.collect()
         
@@ -455,7 +457,7 @@ class OmniGen(nn.Module, PeftAdapterMixin):
             cond = uncond + cfg_scale * (cond - uncond)
             model_out = [cond, cond]
         
-        print([f'{kvb/(1024**2):0.3f}' for kvb in past_key_values.cached_bytes()])
+        #print([f'{kvb/(1024**2):0.3f}' for kvb in past_key_values.cached_bytes()])
         return torch.cat(model_out, dim=0), past_key_values
 
     def none_device(self, val, device=None):
@@ -495,7 +497,7 @@ class OmniGen(nn.Module, PeftAdapterMixin):
                                                         #   past_key_values=past_key_values, return_past_key_values=True, offload_model=offload_model)
             #past_key_values[i] = past_kv_i                                              
             
-            print([f'{kvb/(1024**2):0.3f}' for kvb in past_key_values[i].cached_bytes()])
+            #print([f'{kvb/(1024**2):0.3f}' for kvb in past_key_values[i].cached_bytes()])
             if offload_model:
                 #x[i] = self.none_device(x[i],'cpu')
                 # input_ids[i] = self.none_device(input_ids[i],'cpu')
