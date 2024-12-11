@@ -32,6 +32,8 @@ class Phi3Transformer(Phi3Model):
     Args:
         config: Phi3Config
     """
+    _clamp_val_min = 32768.0
+    _clamp_val_max = None
     def prefetch_layer(self, layer_idx: int, device: torch.device):
         "Starts prefetching the next layer cache"
         with torch.cuda.stream(self.prefetch_stream):
@@ -60,6 +62,9 @@ class Phi3Transformer(Phi3Model):
         # load next layer
         self.prefetch_layer((layer_idx + 1) % len(self.layers), device)
         
+    def set_clamp_val(self, min_val:float=-32768.0, max_val:float = None):
+        self._clamp_val_min = min_val
+        self._clamp_val_max = max_val
 
     def forward(
         self,
@@ -148,10 +153,10 @@ class Phi3Transformer(Phi3Model):
         if offload_model and not hasattr(self, "prefetch_stream"):
             self.prefetch_stream = torch.cuda.Stream()
         
-        pbar = tqdm(range(len(self.layers)))
+        #pbar = tqdm(range(len(self.layers)))
         
-        for layer_idx in pbar:
-            hidden_states.clamp_(-(2**15), (2**15))
+        for layer_idx in range(len(self.layers)):
+            hidden_states.clamp_(-self._clamp_val_min, self._clamp_val_max)
             #buffer = (2**5)+16+1 # the minimum buffer to prevent float16 overflow
             #hidden_states.clamp_min_(f_info.min+buffer)
 
@@ -191,18 +196,20 @@ class Phi3Transformer(Phi3Model):
 
             hidden_states:torch.Tensor = layer_outputs[0]
 
-            pbar.set_postfix({'nans': hidden_states.isnan().sum().item(), 'min': hidden_states.min().item(), 'max': hidden_states.max().item(), 
-                              'mean': hidden_states[torch.logical_and(hidden_states<f_info.max, hidden_states>f_info.min)].mean().item()})
-            pbar.update()
+            # pbar.set_postfix({'nans': hidden_states.isnan().sum().item(), 'min': hidden_states.min().item(), 'max': hidden_states.max().item(), 
+            #                   'mean': hidden_states[torch.logical_and(hidden_states<f_info.max, hidden_states>f_info.min)].mean().item()})
+            # pbar.update()
             #sancheck(hidden_states,'hidden_states')
             if use_cache:
                 next_decoder_cache = layer_outputs[2 if output_attentions else 1]
 
             if output_attentions:
                 all_self_attns += (layer_outputs[1],)
-        pbar.close()
+        #pbar.close()
         hidden_states = self.norm(hidden_states)
         sancheck(hidden_states,'normed hidden_states')
+        if hidden_states.isnan().any():
+            raise ArithmeticError('nans detected, fp16 overflow')
         # add hidden states from the last decoder layer
         if output_hidden_states:
             all_hidden_states += (hidden_states,)

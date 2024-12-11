@@ -1,4 +1,4 @@
-from tqdm import tqdm
+from tqdm.auto import tqdm
 from typing import Optional, Dict, Any, Tuple, List
 import gc
 
@@ -212,7 +212,7 @@ class OmniGenScheduler:
                 model_kwargs['attention_mask'] = self.crop_attention_mask_for_cache(model_kwargs['attention_mask'], num_tokens_for_img)
                 for i in range(n_cache):
                     scache = cache[i] if isinstance(cache, list) else cache
-                    print('k_cpu,k_gpu, v_cpu,v_gpu:', [f'{kvb/(1024**2):0.3f}' for kvb in scache.cached_bytes()])
+                    print(i, 'k_cpu,k_gpu, v_cpu,v_gpu:', [f'{kvb/(1024**2):0.3f}' for kvb in scache.cached_bytes()])
             pbar.update()
         pbar.close()
         del cache
