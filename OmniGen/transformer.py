@@ -122,9 +122,11 @@ class Phi3Transformer(Phi3Model):
         #print(f_info)
         # inputs_embeds.clip_(f_info.min+(2**1), f_info.max-(2**1))
         if attention_mask is not None and attention_mask.dim() == 3:
-            dtype = inputs_embeds.dtype
-            min_dtype = torch.finfo(dtype).min
-            attention_mask = (1 - attention_mask) * min_dtype
+            #dtype = inputs_embeds.dtype
+            #min_dtype = torch.finfo(dtype).min
+            inverted_mask = 1.0 - attention_mask
+            attention_mask = inverted_mask.masked_fill(inverted_mask.to(torch.bool), f_info.min)
+            #attention_mask = (1 - attention_mask) * min_dtype
             attention_mask = attention_mask.unsqueeze(1).to(inputs_embeds.dtype)
             # sancheck(attention_mask,'attention_mask')
         else:
@@ -144,15 +146,16 @@ class Phi3Transformer(Phi3Model):
         
         # init stream
         if offload_model and not hasattr(self, "prefetch_stream"):
-            self.prefetch_stream = torch.cuda.Stream(inputs_embeds.device)
+            self.prefetch_stream = torch.cuda.Stream()
         
         pbar = tqdm(range(len(self.layers)))
         
         for layer_idx in pbar:
-            # hidden_states.clip_(-32768.0, 32768.0)
-            buffer = (2**5)+16+1 # the minimum buffer to prevent float16 overflow
+            hidden_states.clamp_(-(2**15), (2**15))
+            #buffer = (2**5)+16+1 # the minimum buffer to prevent float16 overflow
+            #hidden_states.clamp_min_(f_info.min+buffer)
 
-            hidden_states.clip_(f_info.min+buffer, f_info.max)
+            #hidden_states.clip_(f_info.min+buffer, f_info.max)
             # mask = torch.logical_and(hidden_states<(2**16), hidden_states>-(2**16))
             # hidden_states[mask] = hidden_states[mask].clip(-32768.0, 32768.0)
             #hidden_states[torch.logical_and(hidden_states<f_info.max, hidden_states>f_info.min)].clip_(-32768.0, 32768.0)
