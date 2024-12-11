@@ -53,6 +53,9 @@ def best_available_device():
         device = torch.device("cpu")
     return device
 
+def sancheck(x: torch.Tensor, desc:str = ''):
+    print(desc, x.dtype, {'nans': x.isnan().sum().item(), 'min': x.min().item(), 'max': x.max().item()})
+
 def print_mem(msg:str = None):
     free,tot = torch.cuda.mem_get_info()
     max_reser = torch.cuda.max_memory_reserved()
@@ -261,8 +264,7 @@ class OmniGenPipeline:
         if not self.model.quantized:
             self.model.dtype = dtype
             self.model.to(dtype)
-        if self.model_cpu_offload and separate_cfg_infer:
-            self.vae = self.vae.to(dtype) # Uncomment this line to allow bfloat16 VAE
+        # self.vae = self.vae.to(dtype) # Uncomment this line to allow bfloat16 VAE
         # self.vae.enable_tiling()
         # self.vae.enable_slicing()
         if offload_model:
@@ -346,10 +348,8 @@ class OmniGenPipeline:
         samples = scheduler(latents, func, model_kwargs, use_kv_cache=use_kv_cache, offload_kv_cache=offload_kv_cache).chunk((1+num_cfg), dim=0)[0]
         print_mem('After scheduler')
         if self.model_cpu_offload:
-            for name, param in self.model.named_parameters():
-                param.data = param.data.to('cpu')
-            #if not self.model.quantized:
-            #    self.model.to("cpu")
+            if not self.model.quantized:
+                self.model.to("cpu")
 
             torch.cuda.empty_cache()  
             gc.collect()  
@@ -377,6 +377,7 @@ class OmniGenPipeline:
             torch.cuda.empty_cache()  
             gc.collect()  
         
+        sancheck(samples, 'samples')
         samples = (samples * 0.5 + 0.5).clamp(0, 1)
 
         if output_type == "pt":

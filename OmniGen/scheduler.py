@@ -5,7 +5,8 @@ import gc
 import torch
 from transformers.cache_utils import Cache, DynamicCache, OffloadedCache
 
-
+def sancheck(x: torch.Tensor, desc:str = ''):
+    print(desc, x.dtype, {'nans': x.isnan().sum().item(), 'min': x.min().item(), 'max': x.max().item()})
 
 class OmniGenCache(DynamicCache):
     def __init__(self, 
@@ -190,11 +191,14 @@ class OmniGenScheduler:
                 cache = OmniGenCache(num_tokens_for_img, offload_kv_cache)
             #cache = OmniGenCache(num_tokens_for_img, offload_kv_cache, n_copies=cache_cps)
         results = {}
-        for i in tqdm(range(self.num_steps)):
+        pbar = tqdm(range(self.num_steps))
+        for i in pbar:
             # timesteps = torch.zeros(size=(len(z), )).to(z.device) + self.sigma[i]
             timesteps = torch.full(size=(len(z), ), fill_value=self.sigma[i], device=z.device)
+            #sancheck(timesteps,'timesteps')
             pred, cache = func(z, timesteps, past_key_values=cache, **model_kwargs)
-
+            pbar.set_postfix({'nans': pred.isnan().sum().item(), 'min': pred.min().item(), 'max': pred.max().item()})
+            
             z += (self.sigma[i+1] - self.sigma[i]) * pred
             if i == 0 and use_kv_cache:
                 num_tokens_for_img = z.size(-1)*z.size(-2) // 4
@@ -209,7 +213,8 @@ class OmniGenScheduler:
                 for i in range(n_cache):
                     scache = cache[i] if isinstance(cache, list) else cache
                     print('k_cpu,k_gpu, v_cpu,v_gpu:', [f'{kvb/(1024**2):0.3f}' for kvb in scache.cached_bytes()])
-
+            pbar.update()
+        pbar.close()
         del cache
         torch.cuda.empty_cache()  
         gc.collect()

@@ -20,7 +20,10 @@ from transformers.cache_utils import Cache, DynamicCache, StaticCache
 from transformers.utils import logging
 
 logger = logging.get_logger(__name__)
+from tqdm.auto import tqdm
 
+def sancheck(x: torch.Tensor, desc:str = ''):
+    print(desc, x.dtype, {'nans': x.isnan().sum().item(), 'min': x.min().item(), 'max': x.max().item()})
 
 class Phi3Transformer(Phi3Model):
     """
@@ -106,7 +109,7 @@ class Phi3Transformer(Phi3Model):
 
         # if inputs_embeds is None:
         #     inputs_embeds = self.embed_tokens(input_ids)
-
+        
         # if cache_position is None:
         #     past_seen_tokens = past_key_values.get_seq_length() if past_key_values is not None else 0
         #     cache_position = torch.arange(
@@ -114,18 +117,24 @@ class Phi3Transformer(Phi3Model):
         #     )
         # if position_ids is None:
         #     position_ids = cache_position.unsqueeze(0)
-
+        
+        f_info = torch.finfo(inputs_embeds.dtype)
+        #print(f_info)
+        # inputs_embeds.clip_(f_info.min+(2**1), f_info.max-(2**1))
         if attention_mask is not None and attention_mask.dim() == 3:
             dtype = inputs_embeds.dtype
             min_dtype = torch.finfo(dtype).min
             attention_mask = (1 - attention_mask) * min_dtype
             attention_mask = attention_mask.unsqueeze(1).to(inputs_embeds.dtype)
+            # sancheck(attention_mask,'attention_mask')
         else:
             raise Exception("attention_mask parameter was unavailable or invalid")
-            # causal_mask = self._update_causal_mask(
-            #     attention_mask, inputs_embeds, cache_position, past_key_values, output_attentions
-            # )
-
+        causal_mask = attention_mask
+        # causal_mask = self._update_causal_mask(
+        #     attention_mask, inputs_embeds, cache_position, past_key_values, output_attentions
+        # )
+        # causal_mask = attention_mask
+        #sancheck(attention_mask,'attention_mask')
         hidden_states = inputs_embeds
 
         # decoder layers
@@ -136,8 +145,17 @@ class Phi3Transformer(Phi3Model):
         # init stream
         if offload_model and not hasattr(self, "prefetch_stream"):
             self.prefetch_stream = torch.cuda.Stream(inputs_embeds.device)
+        
+        pbar = tqdm(range(len(self.layers)))
+        
+        for layer_idx in pbar:
+            # hidden_states.clip_(-32768.0, 32768.0)
+            buffer = (2**5)+16+1 # the minimum buffer to prevent float16 overflow
 
-        for layer_idx in range(len(self.layers)):
+            hidden_states.clip_(f_info.min+buffer, f_info.max)
+            # mask = torch.logical_and(hidden_states<(2**16), hidden_states>-(2**16))
+            # hidden_states[mask] = hidden_states[mask].clip(-32768.0, 32768.0)
+            #hidden_states[torch.logical_and(hidden_states<f_info.max, hidden_states>f_info.min)].clip_(-32768.0, 32768.0)
             # direct indexing since offloading may mutate self.layers during iteration 
             decoder_layer = self.layers[layer_idx]
             if output_hidden_states:
@@ -147,7 +165,8 @@ class Phi3Transformer(Phi3Model):
                 layer_outputs = self._gradient_checkpointing_func(
                     decoder_layer.__call__,
                     hidden_states,
-                    attention_mask,
+                    causal_mask,#attention_mask,
+                    
                     position_ids,
                     past_key_values,
                     output_attentions,
@@ -159,7 +178,7 @@ class Phi3Transformer(Phi3Model):
                     self.get_offload_layer(layer_idx, device=inputs_embeds.device)
                 layer_outputs = decoder_layer(
                     hidden_states,
-                    attention_mask=attention_mask,
+                    attention_mask=causal_mask,#attention_mask,
                     position_ids=position_ids,
                     past_key_value=past_key_values,
                     output_attentions=output_attentions,
@@ -167,16 +186,20 @@ class Phi3Transformer(Phi3Model):
                     cache_position=cache_position,
                 )
 
-            hidden_states = layer_outputs[0]
+            hidden_states:torch.Tensor = layer_outputs[0]
 
+            pbar.set_postfix({'nans': hidden_states.isnan().sum().item(), 'min': hidden_states.min().item(), 'max': hidden_states.max().item(), 
+                              'mean': hidden_states[torch.logical_and(hidden_states<f_info.max, hidden_states>f_info.min)].mean().item()})
+            pbar.update()
+            #sancheck(hidden_states,'hidden_states')
             if use_cache:
                 next_decoder_cache = layer_outputs[2 if output_attentions else 1]
 
             if output_attentions:
                 all_self_attns += (layer_outputs[1],)
-
+        pbar.close()
         hidden_states = self.norm(hidden_states)
-
+        sancheck(hidden_states,'normed hidden_states')
         # add hidden states from the last decoder layer
         if output_hidden_states:
             all_hidden_states += (hidden_states,)
